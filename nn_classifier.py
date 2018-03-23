@@ -13,6 +13,7 @@ from hyperparameter import *
 import time
 from tree_batch import Forest
 
+
 class LSTMClassifier:
     def __init__(self, hyperparameter):
         self.hyperparameter = hyperparameter
@@ -24,7 +25,7 @@ class LSTMClassifier:
         model = LSTM(self.hyperparameter)
         if self.hyperparameter.cuda:
             model.cuda()
-        parameters = filter(lambda p:p.requires_grad,model.parameters())
+        parameters = filter(lambda p: p.requires_grad, model.parameters())
         optimizer = optim.Adam(params=parameters, lr=self.hyperparameter.learn_rate)
         max_accuracy = 0.0
         for i in range(self.hyperparameter.epoch):
@@ -51,7 +52,7 @@ class LSTMClassifier:
                     if y.data[j] == max_list[j]:
                         cor_sentence += 1
                     sum_sentences += 1
-            # print("train_set accuracy:{}\n consume time:{}".format(cor/sum,time.time()-start))
+            print("train_set accuracy:{}\n consume time:{}".format(cor_sentence/sum_sentences,time.time()-start))
             if dev_set is not None:
                 self.eval(model, dev_set, "dev", self.hyperparameter.cuda)
             if test_set is not None:
@@ -77,7 +78,7 @@ class LSTMClassifier:
             self.hyperparameter.vocab = vocab
             self.hyperparameter.n_embed = len(vocab)
             # self.hyperparameter.embed_pickle = "data/embed_" + str(i) + ".pkl"    # dim 100 word-vector
-            self.hyperparameter.embed_pickle = "cv_subj_embed/embed_" + str(i) + ".pkl"  #dim 300 word-vector
+            self.hyperparameter.embed_pickle = "cv_subj_embed/embed_" + str(i) + ".pkl"  # dim 300 word-vector
             # self.hyperparameter.embed_pickle = "cv_cr_embed/embed_" + str(i) + ".pkl"  #dim 300 word-vector
             # self.hyperparameter.embed_pickle = "cv_mr_embed/embed_" + str(i) + ".pkl"  # dim 300 word-vector
             test_accuracy = self.train(train_set, test_set=test_set)
@@ -86,6 +87,7 @@ class LSTMClassifier:
         print("average accuracy：{}".format(sum_acc / len(packet_list)))
 
     def eval(self, model, dataset, dataset_name, cuda):
+        model.eval()
         cor = s = 0
         for d in dataset:
             x, y = self.toVariable(d, cuda)
@@ -93,7 +95,8 @@ class LSTMClassifier:
             if y.data[0] == self.get_max_index(logit.data)[0]:
                 cor += 1
             s += 1
-        # print("{} dataset accuracy ：{}".format(dataset_name,cor/s))
+        print("{} dataset accuracy ：{}".format(dataset_name,cor/s))
+
         return cor / s
 
     @staticmethod
@@ -126,61 +129,105 @@ class TreeLstmClassifier:
     def __init__(self, hyperparameter):
         self.hyperparameter = hyperparameter
 
-    def train(self, train_set,train_tree,dev_set=None, test_set=None):
-        batch_block = len(train_set)//self.hyperparameter.batch_size
-        if len(train_set)%self.hyperparameter.batch_size:
-            batch_block+=1
+    def train(self, train_set, dev_set=None, test_set=None):
+        batch_block = len(train_set[0]) // self.hyperparameter.batch_size
+        if len(train_set[0]) % self.hyperparameter.batch_size:
+            batch_block += 1
         model = BatchChildSumTreeLSTM(self.hyperparameter)
         if self.hyperparameter.cuda:
             model.cuda()
         parameters = filter(lambda p: p.requires_grad, model.parameters())
-        optimizer = optim.Adam(params=parameters,lr = self.hyperparameter.learn_rate)
-        model.train()
+        optimizer = optim.Adam(params=parameters, lr=self.hyperparameter.learn_rate,weight_decay=1e-5)
+        train = train_set[0]
+        train_tree = train_set[1]
+        dev_forest = Forest(dev_set[1])
+        test_forest = Forest(test_set[1])
         for i in range(self.hyperparameter.epoch):
-            loss_sum = num_sentences = cor_sentences =0
+            model.train()
+            loss_sum = num_sentences = cor_sentences = 0
             start = time.time()
-            #add batch
+            print("第{}次训练:".format(i+1))
+            #no batch
+            # for idx in range(len(train)):
+            #     optimizer.zero_grad()
+            #     sentence = autograd.Variable(torch.LongTensor(train[idx].code_list))
+            #     embeds = embed_model(sentence)
+            #     y = autograd.Variable(torch.LongTensor([train[idx].label]))
+            #     out,loss =model.forward(train_tree[idx],embeds,y)
+            #     loss = F.cross_entropy(out,y)
+            #     loss.backward()
+            #     optimizer.step()
+            #     max_list = self.get_max_index(out.data)
+            #     if y.data[0] == max_list[0]:
+            #         cor_sentences+=1
+            #     num_sentences+=1
+            # print("train accuracy:{},time:{}".format(cor_sentences/num_sentences,time.time()-start))
+            #
+            # self.eval(embed_model,model,dev_set[0],dev_set[1],"dev")
+            # self.eval(embed_model,model,test_set[0],test_set[1],"test")
+            # clean_state(train_set[1])
+            # clean_state(dev_set[1])
+            # clean_state(test_set[1])
+            # add batch
             for idx in range(batch_block):
                 optimizer.zero_grad()
-                left = idx*self.hyperparameter.batch_size
-                right = left+self.hyperparameter.batch_size
-                if right<len(train_set):
+                # model.zero_grad()
+                left = idx * self.hyperparameter.batch_size
+                right = left + self.hyperparameter.batch_size
+                if right < len(train):
                     forest = Forest(train_tree[left:right])
-                    data = train_set[left:right]
+                    data = train[left:right]
                 else:
                     forest = Forest(train_tree[left:])
-                    data = train_set[left:]
-
+                    data = train[left:]
                 y = autograd.Variable(torch.LongTensor([l.label for l in data]))
+                # forest.clean_state()
                 out,loss = model.forward(forest,y)
                 # loss = F.cross_entropy(out,y)
+                loss_sum+=loss.data[0]
                 loss.backward()
                 optimizer.step()
                 max_list = self.get_max_index(out.data)
                 for x in range(len(max_list)):
                     if y.data[x] == max_list[x]:
-                        cor_sentences+=1
-                    num_sentences+=1
-                # if idx%100 == 0 and idx!=0:
-                #     print("loss : {}".format(loss.data[0]))
-            print("this epoch loss :{},train_accuracy : {},consume time:{}".format(loss.data[0],
+                        cor_sentences += 1
+                    num_sentences += 1
+                forest.clean_state()
+            print("this epoch loss :{},train_accuracy : {},consume time:{}".format(loss_sum/batch_block,
                                                                                    cor_sentences / num_sentences,
                                                                                    time.time() - start))
-            self.eval(model,dev_set[0],dev_set[1],"dev")
-            self.eval(model,test_set[0],test_set[1],"test")
 
-    def eval(self,model,dataset,tree_dataset,dataset_name):
+            self.eval(model, dev_set[0], dev_forest, "dev")
+            # self.eval(model, test_set[0], test_forest, "test")
+
+    def eval(self,model, dataset, tree_dataset, dataset_name):
         model.eval()
         cor = total = 0
-        forest = Forest(tree_dataset)
+        #no batch
+        # for idx in range(len(dataset)):
+        #     y = autograd.Variable(torch.LongTensor([dataset[idx].label]))
+        #     embeds = embed_model(autograd.Variable(torch.LongTensor(dataset[idx].code_list)))
+        #     out,loss = model(tree_dataset[idx],embeds,y)
+        #     max_list = self.get_max_index(out.data)
+        #     if y.data[0] == max_list[0]:
+        #         cor+= 1
+        #     total +=1
+
+        #batch
+        forest = tree_dataset
         y = autograd.Variable(torch.LongTensor([l.label for l in dataset]))
         out,loss = model(forest,y)
+        forest.clean_state()
         max_list = self.get_max_index(out.data)
+        # print([l.label for l in dataset])
+        # print(max_list)
         for x in range(len(max_list)):
             if y.data[x] == max_list[x]:
-                cor+=1
-            total+=1
-        print("{} accuracy:{}".format(dataset_name,cor/total))
+                cor += 1
+            total += 1
+
+        print("{}_set accuracy:{}".format(dataset_name, cor / total))
+        # model.train()
 
     @staticmethod
     def get_max_index(output):
@@ -196,16 +243,6 @@ class TreeLstmClassifier:
                     max_index = j
             max_list.append(max_index)
         return max_list
-
-    @staticmethod
-    def toVariable(data, cuda):
-        if cuda:
-            x = autograd.Variable(torch.LongTensor([data.code_list])).cuda()
-            y = autograd.Variable(torch.LongTensor([data.label])).cuda()
-        else:
-            x = autograd.Variable(torch.LongTensor([data.code_list]))
-            y = autograd.Variable(torch.LongTensor([data.label]))
-        return x, y
 
 class BatchGenerator:
 
@@ -254,7 +291,6 @@ class BatchGenerator:
 
 
 if __name__ == "__main__":
-
     # lstm sentiment classifier use cv
     # param = HyperParameter()
     # # packet_list = DataUtils.cross_validation('data/rt-polarity.all', param.packet_nums, encoding='iso-8859-1',
@@ -268,19 +304,24 @@ if __name__ == "__main__":
 
     # treelstm sentiment classifier on SST
     param = HyperParameter()
-    p_train = Process('dataset/stsa.binary.train',False)
-    p_dev = Process('dataset/stsa.binary.dev',False)
-    p_test = Process('dataset/stsa.binary.test',False)
+    p_train = Process('dataset/stsa.binary.train', sst=True,clean=False)
+    p_dev = Process('dataset/stsa.binary.dev', sst=True,clean=False)
+    p_test = Process('dataset/stsa.binary.test', sst=True,clean=False)
     vocab = DataUtils.create_voca(p_train.result)
-    train_set = DataUtils.encode(p_train.result,vocab)
-    dev_set = DataUtils.encode(p_dev.result,vocab)
-    test_set = DataUtils.encode(p_test.result,vocab)
-    train_dependency_tree = DataUtils.build_tree_conll('data/stsa.binary.train.sen.output',p_train.result,vocab)
-    dev_dependency_tree = DataUtils.build_tree_conll('data/stsa.binary.dev.sen.output',p_dev.result,vocab)
-    test_dependency_tree = DataUtils.build_tree_conll('data/stsa.binary.test.sen.output',p_test.result,vocab)
+    train_set = DataUtils.encode(p_train.result, vocab)
+    dev_set = DataUtils.encode(p_dev.result, vocab)
+    test_set = DataUtils.encode(p_test.result, vocab)
+    train_dependency_tree = DataUtils.build_tree_conll('data/sst_no_clean/stsa.binary.train.sen.output', p_train.result, vocab)
+    dev_dependency_tree = DataUtils.build_tree_conll('data/sst_no_clean/stsa.binary.dev.sen.output', p_dev.result, vocab)
+    test_dependency_tree = DataUtils.build_tree_conll('data/sst_no_clean/stsa.binary.test.sen.output', p_test.result, vocab)
     param.n_embed = len(vocab)
     param.embed_dim = 300
     param.n_label = 2
     param.vocab = vocab
     classifier = TreeLstmClassifier(param)
-    classifier.train(train_set,train_dependency_tree,dev_set=(dev_set,dev_dependency_tree),test_set=(test_set,test_dependency_tree))
+    # train_set.extend(dev_set)
+    # train_dependency_tree.extend(dev_dependency_tree)
+    dev_set.extend(test_set)
+    dev_dependency_tree.extend(test_dependency_tree)
+    classifier.train(train_set=(train_set, train_dependency_tree), dev_set=(dev_set, dev_dependency_tree),
+                     test_set=(test_set, test_dependency_tree))
