@@ -1,42 +1,44 @@
 from data_utils import *
 import numpy as np
+from hyperparameter import HyperParameter
 
 class Forest:
 
     def __init__(self,trees):
-
+        self.param = HyperParameter()
+        self.step = 0
         self.trees = trees
-        self.node_list = trees_to_nodes(trees)
-        self.adj_mat = nodes_to_adjmat(self.node_list)
-        self.max_level = get_max_level(self.node_list)
+        self.node_list = self.trees_to_nodes(trees)
+        self.max_level = self.get_max_level()
+        self.max_step = self.get_max_step()
 
-def trees_to_nodes(trees):
-    node_list = []
-    for tree in trees:
-        tree.forest_ix = len(node_list)
-        node_list.append(tree)
+    def clean_state(self):
+        for node in self.node_list:
+            node.state = None
+            node.f = None
+            node.loss = None
+            node.out = None
+
+    def trees_to_nodes(self,trees):
+        node_list = []
+        for idx,tree in enumerate(trees):
+            tree.forest_ix = len(node_list)
+            tree.mark = idx
+            node_list.append(tree)
+            self.add_forest_ix(tree,node_list,idx)
+        return node_list
+
+    def add_forest_ix(self,tree,node_list,idx):
         for child in tree.children:
             child.forest_ix = len(node_list)
+            child.mark = idx
             node_list.append(child)
-            add_forest_ix(child,node_list)
-    return node_list
+            self.add_forest_ix(child,node_list,idx)
 
-def add_forest_ix(tree,node_list):
-    for child in tree.children:
-        child.forest_ix = len(node_list)
-        node_list.append(child)
-        add_forest_ix(child,node_list)
+    def get_max_level(self):
+        return max([n.level for n in self.node_list])
 
-def nodes_to_adjmat(node_list):
-    v = len(node_list)
-    matrix = np.zeros((v,v))
-    for i in range(v):
-        for j in range(v):
-            if node_list[j] in node_list[i].children:
-                matrix[i][j] = 1
-    return matrix
-
-def get_max_level(node_list):
-    return max([n.level for n in node_list])
+    def get_max_step(self):
+        return max([n.step for n in self.node_list])
 
 

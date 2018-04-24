@@ -5,15 +5,20 @@ import time
 import sys
 import torch
 import torch.autograd as autograd
+from hyperparameter import HyperParameter
+from tqdm import tqdm
 
 random.seed(5)
+
+param =HyperParameter()
 class Instance:
     def __init__(self):
         self.sentence = ''
         self.label = '-1'
 
     def show(self):
-        print(self.sentence,' ',self.label)
+        print(self.sentence, ' ', self.label)
+
 
 class Code:
     def __init__(self):
@@ -21,7 +26,8 @@ class Code:
         self.label = []
 
     def show(self):
-        print(self.code_list,' ',self.label)
+        print(self.code_list, ' ', self.label)
+
 
 class Node:
     def __init__(self):
@@ -32,37 +38,48 @@ class Node:
         self.flag = False
         self.relation = ''
 
+
 class Tree:
-    def __init__(self,value,label,level,word,word_idx):
+    def __init__(self, value, label, level, word, word_idx):
         self.value = value
         self.children = []
-        self.state = (torch.zeros(1,150),torch.zeros(1,150)) #save c and h
+        self.state = (torch.zeros(1, param.hidden_dim), torch.zeros(1, param.hidden_dim))  # save c and h
         self.label = label
-        self.level = level #depth of tree
+        self.level = level  # depth of tree
+        self.step = 0
         self.forest_ix = 0
         self.loss = 0
-        self.f = torch.zeros(1,150)
+        self.out = 0
+        self.fc = torch.zeros(1, param.hidden_dim)
         self.word = word
         self.word_idx = word_idx
+        self.mark = 0
+        self.tree_idx = 0
 
-    def add_child(self,child_tree):
+    def add_child(self, child_tree):
         self.children.append(child_tree)
 
-class Process:
-    def __init__(self,path=None,clean_switch=False):
-        self.result = []
-        self.load_file(path,clean_switch)
 
-    def load_file(self,path,clean_switch):
-        with open(path,'r') as f:
+class Process:
+    def __init__(self, path=None, sst=False, clean=False):
+        self.result = []
+        self.load_file(path, sst, clean)
+
+    def load_file(self, path, sst, clean):
+        with open(path, 'r') as f:
             for line in f:
-                if clean_switch:
-                    line = DataUtils.clean_str(line)
-                info = line.split(' ',1)
+                if clean:
+                    if sst:
+                        line = DataUtils.clean_str_sst(line)
+                    else:
+                        line = DataUtils.clean_str(line)
+                info = line.split(' ', 1)
+                assert len(info) == 2
                 inst = Instance()
                 inst.sentence = info[1].split()
                 inst.label = info[0]
                 self.result.append(inst)
+
 
 class DataUtils:
 
@@ -72,48 +89,18 @@ class DataUtils:
         for r in result:
             for s in r.sentence:
                 if s not in vocabulary.keys():
-                    vocabulary[s] = len(vocabulary)+1
+                    vocabulary[s] = len(vocabulary) + 1
                 else:
                     pass
-        vocabulary['-unknown-'] = len(vocabulary)+1
+        vocabulary['-unknown-'] = len(vocabulary) + 1
         vocabulary['-padding-'] = 0
         return vocabulary
 
     @staticmethod
-    def cross_validation(path, packet_nums, encoding='UTF-8',clean_switch=False):
+    def cross_validation(path, packet_nums, encoding='UTF-8', clean_switch=False):
         result = []
         packet_list = []
-        with open(path,'r',encoding=encoding) as fin:
-            for line in fin:
-                if clean_switch:
-                    line = DataUtils.clean_str(line)
-                info = line.split(' ',1)
-                inst = Instance()
-                # print(line)
-                assert len(info) == 2
-                inst.sentence = info[1].split()
-                inst.label = info[0]
-                result.append(inst)
-        random.shuffle(result)
-        length =  len(result)
-        packet_len = length//packet_nums
-        if length % packet_nums != 0 :
-            packet_len += 1
-        packet = []
-        for i,r in enumerate(result):
-            if i%packet_len == 0  and i!=0:
-                packet_list.append(packet)
-                packet = [r]
-            else:
-                packet.append(r)
-        if len(packet) > 0:
-            packet_list.append(packet)
-        return packet_list
-
-    @staticmethod
-    def read_data(path,encoding='UTF-8',clean_switch = False):
-        result = []
-        with open(path,'r',encoding=encoding) as fin:
+        with open(path, 'r', encoding=encoding) as fin:
             for line in fin:
                 if clean_switch:
                     line = DataUtils.clean_str(line)
@@ -124,34 +111,37 @@ class DataUtils:
                 inst.sentence = info[1].split()
                 inst.label = info[0]
                 result.append(inst)
+        random.shuffle(result)
+        length = len(result)
+        packet_len = length // packet_nums
+        if length % packet_nums != 0:
+            packet_len += 1
+        packet = []
+        for i, r in enumerate(result):
+            if i % packet_len == 0 and i != 0:
+                packet_list.append(packet)
+                packet = [r]
+            else:
+                packet.append(r)
+        if len(packet) > 0:
+            packet_list.append(packet)
+        return packet_list
 
     @staticmethod
-    def extract_sentences(rpath,wpath,encoding='utf8',clean_switch=False):
-        with open(rpath,'r',encoding=encoding) as fin,open(wpath,'a') as fout:
+    def read_data(path, clean_switch=False):
+        result = []
+        with open(path, 'r') as fin:
             for line in fin:
-                line = line.strip()
+                info = line.split('|||')
+                assert len(info) == 2
                 if clean_switch:
-                    line  = DataUtils.clean_str(line)
-                fout.write(line.split(' ',1)[1]+'\n')
-
-    @staticmethod
-    def extract_dependency_tree(treepath,savepath):
-        with open(treepath,'r') as fin,open(savepath,'a') as fout:
-            i=1
-            for line in fin:
-                if line.startswith("Dependency Parse (enhanced plus plus dependencies):"):
-                    line = fin.readline()
-                    while line!='\n':
-                        fout.write(line)
-                        line = fin.readline()
-                    fout.write('\n')
-                    # fout.flush()
-                    print(i)
-                    i+=1
-                else:
-                    pass
-            print('..')
-
+                    info[0] = DataUtils.clean_str(info[0])
+                    info[1] = DataUtils.clean_str(info[1])
+                inst = Instance()
+                inst.sentence = info[0].split()
+                inst.label = info[1]
+                result.append(inst)
+        return result
 
     @staticmethod
     def clean_str(string):
@@ -176,7 +166,23 @@ class DataUtils:
         return string.strip().lower()
 
     @staticmethod
-    def encode(result,vocabulary):
+    def clean_str_sst(string):
+        """
+            Tokenization/string cleaning for the SST dataset
+        """
+        string = re.sub(r"[^A-Za-z0-9(),!?\'`]", " ", string)
+        string = re.sub(r"\s{2,}", " ", string)
+        return string.strip().lower()
+
+    @staticmethod
+    def generate_sst_sen(path, result):
+        print("w")
+        with open(path, 'w') as fout:
+            for r in result:
+                fout.write(' '.join(r.sentence) + '\n')
+
+    @staticmethod
+    def encode(result, vocabulary):
         encodes = []
         for r in result:
             code = Code()
@@ -186,11 +192,19 @@ class DataUtils:
                 else:
                     code.code_list.append(vocabulary['-unknown-'])
             if r.label == '0':
-                code.label=0
+                code.label = 0
             elif r.label == '1':
-                code.label=1
+                code.label = 1
+            elif r.label == '2':
+                code.label = 2
+            elif r.label == '3':
+                code.label = 3
+            elif r.label == '4':
+                code.label = 4
             else:
                 raise RuntimeError("label index out of process ")
+            if len(code.code_list) <=2:
+                continue
             encodes.append(code)
         return encodes
 
@@ -199,67 +213,29 @@ class DataUtils:
         return string[::-1]
 
     @staticmethod
-    def build_tree_from_file(file_name,result,vocab):
+    def build_tree_conll(file_name, result, vocab):
         trees = []
-        with open(file_name,'r') as fin:
-            nodes = []
-            i=0
-            for line in fin:
-                line = line.strip()
-                info = line.split(' ',1)
-                words = info[1].split(' ')
-                for word in words:
-                    node = Node()
-                    w_info = word.split('_')
-                    node.label = int(info[0])
-                    if w_info[0].endswith("'''"):
-                        node.word_index = int(w_info[0].split("'''")[0])
-                    else:
-                        node.word_index = int(w_info[0])
-                    if w_info[1].endswith("'''"):
-                        node.parent_index = int(w_info[1].split("'''")[0])
-                    else:
-                        node.parent_index = int(w_info[1])
-                    node.relation = w_info[2]
-                    nodes.append(node)
-                sentences = result[i].sentence
-                for n in nodes:
-                    if n.relation == 'root':
-                        if sentences[n.word_index-1] in vocab:
-                            word_idx =vocab[sentences[n.word_index-1]]
-                        else:
-                            word_idx = vocab['-unknown-']
-                        tree = Tree(n.word_index,n.label,0,sentences[n.word_index-1],word_idx)
-                        child_value = n.word_index
-                        # nodes.remove(n)
-                        n.flag = True
-                        DataUtils.add_tree(tree,child_value,nodes,1,sentences,vocab)
-                        trees.append(tree)
-                nodes = []
-                i+=1
-        return trees
-
-    @staticmethod
-    def build_tree_conll(file_name,result,vocab):
-        trees = []
-        i=0
-        with open(file_name,'r') as fin:
+        i = 0
+        with open(file_name, 'r') as fin:
             nodes = []
             for line in fin:
-                if line!='\n':
+                if line != '\n':
                     # print(line)
-                    sentence = result[i].sentence
                     lines = line.strip().split()
                     node = Node()
                     node.word = lines[1]
                     node.word_index = int(lines[0])
-                    node.parent_index = int(lines[5])
-                    node.relation = lines[6]
+                    # node.parent_index = int(lines[5])
+                    # node.relation = lines[6]
+                    node.parent_index = int(lines[6])
+                    node.relation = lines[7]
                     node.label = int(result[i].label)
                     nodes.append(node)
                 else:
+                    sentence = result[i].sentence
+                    # print(sentence)
                     for node in nodes:
-                        if node.relation == "ROOT":
+                        if node.relation == "root":
                             if sentence[node.word_index - 1] in vocab:
                                 word_idx = vocab[sentence[node.word_index - 1]]
                             else:
@@ -267,31 +243,124 @@ class DataUtils:
                             tree = Tree(node.word_index, node.label, 0, sentence[node.word_index - 1], word_idx)
                             child_value = node.word_index
                             node.flag = True
-                            DataUtils.add_tree(tree, child_value, nodes, 1, sentence, vocab)
+                            DataUtils.add_tree(tree, child_value, nodes, 1, vocab)
                             trees.append(tree)
                     nodes = []
-                    i+=1
+                    i += 1
         return trees
 
+    # @staticmethod
+    # def add_tree(tree, child_value, nodes, level, sentences, vocab):
+    #     for node in nodes:
+    #         if child_value == node.parent_index and node.flag is False:
+    #             if sentences[node.word_index - 1] in vocab:
+    #                 word_idx = vocab[sentences[node.word_index - 1]]
+    #             else:
+    #                 word_idx = vocab['-unknown-']
+    #             child_tree = Tree(node.word_index, node.label, level, sentences[node.word_index - 1], word_idx)
+    #             tree.add_child(child_tree)
+    #             node_index = node.word_index
+    #             # nodes.remove(node)
+    #             node.flag = True
+    #             DataUtils.add_tree(child_tree, node_index, nodes, level + 1, sentences, vocab)
+
     @staticmethod
-    def add_tree(tree,child_value,nodes,level,sentences,vocab):
+    def add_tree(tree, child_value, nodes, level,  vocab):
         for node in nodes:
             if child_value == node.parent_index and node.flag is False:
-                if sentences[node.word_index-1] in vocab:
-                    word_idx = vocab[sentences[node.word_index-1]]
+                if node.word in vocab:
+                    word_idx = vocab[node.word]
                 else:
                     word_idx = vocab['-unknown-']
-                child_tree = Tree(node.word_index,node.label,level,sentences[node.word_index-1],word_idx)
+                child_tree = Tree(node.word_index, node.label, level, node.word, word_idx)
                 tree.add_child(child_tree)
                 node_index = node.word_index
-                # nodes.remove(node)
                 node.flag = True
-                DataUtils.add_tree(child_tree,node_index,nodes,level+1,sentences,vocab)
+                DataUtils.add_tree(child_tree, node_index, nodes, level + 1, vocab)
 
+    @staticmethod
+    def build_deptree(sen_file,label_file,parent_file,vocabulary,sent_dict):
+        vocab = vocabulary.labelToIdx
+        with open(sen_file,'r') as sentences,open(label_file,'r') as labels,open(parent_file,'r') as parents:
+            sen = sentences.readlines()
+            lab = labels.readlines()
+            par = parents.readlines()
+            dep = zip(sen,lab,par)
+            trees = []
+            sentences = []
+            for sen,lab,par in tqdm(dep):
+                tree = DataUtils.read_tree(sen.strip(),lab.strip(),par.strip(),vocab,sent_dict)
+                if tree.label!=1:
+                    trees.append(tree)
+                    sentences.append(vocabulary.convertToIdx(sen.strip().split(),'<unk>'))
+            return trees,sentences
 
+    @staticmethod
+    def read_tree(sentences,labels,parents,vocab,sent_dict):
+        sens = sentences.split()
+        labs = labels.split()
+        pars = parents.split()
+        nodes = []
+        tree = None
+        for idx in range(len(sens)):
+            node = Node()
+            node.word = sens[idx]
+            node.parent_index = int(pars[idx])
+            node.label = DataUtils.parse_dlabel_token(labs[idx],False) # binary set False,fine set True
+            node.word_index = idx+1
+            nodes.append(node)
+        for n in nodes:
+            if n.parent_index == 0:
+                if n.word in vocab:
+                    word_idx = vocab[n.word]
+                else:
+                    word_idx = vocab['-unknown-']
+                tree = Tree(n.word_index,n.label,0,n.word,word_idx)
+                child_value = n.word_index
+                n.flag = True
+                DataUtils.add_tree(tree, child_value, nodes, 1, vocab)
+        return tree
 
+    @staticmethod
+    def parse_dlabel_token(x,fine_grain=False):
+        if x == '#':
+            return None
+        else:
+            if fine_grain: # -2 -1 0 1 2 => 0 1 2 3 4
+                return int(x)+2
+            else: # # -2 -1 0 1 2 => 0 1 2
+                tmp = int(x)
+                if tmp < 0:
+                    return 0
+                elif tmp == 0:
+                    return 1
+                elif tmp >0 :
+                    return 2
 
+    @staticmethod
+    def get_sentiment_dict(labels_file,dict_file):
+        labels = []
+        with open(labels_file,'r') as labelsfile:
+            labelsfile.readline()
+            for line in labelsfile:
+                idx, rating = line.split('|')
+                idx = int(idx)
+                rating = float(rating)
+                if rating <= 0.2:
+                    label = -2
+                elif rating <= 0.4:
+                    label = -1
+                elif rating > 0.8:
+                    label = +2
+                elif rating > 0.6:
+                    label = +1
+                else:
+                    label = 0
+                labels.append(label)
 
-
-
-
+        d = {}
+        with open(dict_file,'r') as dictionary:
+            for line in dictionary:
+                s, idx = line.split('|')
+                d[s] = labels[int(idx)]
+        return d
