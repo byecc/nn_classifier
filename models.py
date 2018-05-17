@@ -5,10 +5,10 @@ import torch.nn.init as init
 import torch.autograd as autograd
 from pack_embedding import LoadEmbedding
 import numpy as np
+import time
 
 torch.manual_seed(233)
-
-
+# torch.cuda.manual_seed(233)
 class CNN(nn.Module):
     def __init__(self, hyperparameter):
         super(CNN, self).__init__()
@@ -28,7 +28,7 @@ class CNN(nn.Module):
         self.embed = LoadEmbedding(V, D)
         if hyperparameter.pretrain:
             self.embed.load_pretrained_embedding(hyperparameter.pretrain_file, hyperparameter.vocab,
-                                                 embed_pickle=hyperparameter.embed_save_pickle, binary=False)
+                            requires_grad=hyperparameter.fine_tune,embed_pickle=hyperparameter.embed_save_pickle, binary=False)
         else:
             self.embed.weight = nn.Parameter(torch.randn((V, D)), requires_grad=hyperparameter.fine_tune)
         self.convs1 = [nn.Conv2d(Ci, Co, (K, D)) for K in Ks]
@@ -208,17 +208,17 @@ class BatchChildSumTreeLSTM(nn.Module):
         self.out_dim = hyperparameter.n_label
         self.add_cuda = hyperparameter.cuda
 
-        self.ix = nn.Linear(self.in_dim, self.hidden_dim, bias=True)
-        self.ih = nn.Linear(self.hidden_dim, self.hidden_dim, bias=False)
+        self.ix = nn.Linear(self.in_dim, self.hidden_dim)
+        self.ih = nn.Linear(self.hidden_dim, self.hidden_dim)
 
-        self.fx = nn.Linear(self.in_dim, self.hidden_dim, bias=True)
-        self.fh = nn.Linear(self.hidden_dim, self.hidden_dim, bias=False)
+        self.fx = nn.Linear(self.in_dim, self.hidden_dim)
+        self.fh = nn.Linear(self.hidden_dim, self.hidden_dim)
 
-        self.ox = nn.Linear(self.in_dim, self.hidden_dim, bias=True)
-        self.oh = nn.Linear(self.hidden_dim, self.hidden_dim, bias=False)
+        self.ox = nn.Linear(self.in_dim, self.hidden_dim)
+        self.oh = nn.Linear(self.hidden_dim, self.hidden_dim)
 
-        self.ux = nn.Linear(self.in_dim, self.hidden_dim, bias=True)
-        self.uh = nn.Linear(self.hidden_dim, self.hidden_dim, bias=False)
+        self.ux = nn.Linear(self.in_dim, self.hidden_dim)
+        self.uh = nn.Linear(self.hidden_dim, self.hidden_dim)
 
         self.out = nn.Linear(self.hidden_dim, self.out_dim)
         self.loss_func = nn.CrossEntropyLoss()
@@ -247,17 +247,19 @@ class BatchChildSumTreeLSTM(nn.Module):
         # embeds = self.dropout(embeds)
         level = forest.max_level
         child_c = child_h = None
-        forest_loss = autograd.Variable(torch.zeros(1))
+        if self.add_cuda:
+            forest_loss = autograd.Variable(torch.zeros(1).cuda())
+        else:
+            forest_loss = autograd.Variable(torch.zeros(1))
+        # gold_list = []
+        # out_list = []
         while level >= 0:
-            nodes = []
-            for node in forest.node_list:
-                if node.level == level:
-                    nodes.append(node)
-            # inputs = []
+            nodes = [node for node in forest.node_list if node.level == level]
             nlen = len(nodes)
             input_ix = []
             chi_par = {}
-            max_childs = 0
+            max_childs,row = 0,0
+            offset_pos,fx_offset,hc_offset,fc_offset = [],[],[],[]
             for idx, node in enumerate(nodes):
                 input_ix.append(node.forest_ix)
                 childs = []
@@ -266,33 +268,9 @@ class BatchChildSumTreeLSTM(nn.Module):
                 for ch_ix, child in enumerate(node.children):
                     childs.append(ch_ix)
                 chi_par[idx] = childs
-                # num = len(node.children)
-                # fx = self.fx(embeds[node.forest_ix])
-                # if num > 0:
-                #     h_sum_list = []
-                #     fc_sum_list = []
-                #     for child in node.children:
-                #         h_sum_list.append(child.state[1])
-                #         f = fx+self.fh(child.state[1])
-                #         f = F.sigmoid(f)
-                #         fc = F.mul(f,child.state[0])
-                #         fc_sum_list.append(fc)
-                #     h_sum.append(torch.unsqueeze(torch.sum(torch.cat(h_sum_list),0),0))
-                #     fc_sum.append(torch.unsqueeze(torch.sum(torch.cat(fc_sum_list),0),0))
-                # elif num == 0:
-                #     if self.add_cuda:
-                #         h_sum.append(autograd.Variable(torch.zeros(1,self.hidden_dim)).cuda())
-                #         fc_sum.append(autograd.Variable(torch.zeros(1,self.hidden_dim)).cuda())
-                #     else:
-                #         h_sum.append(autograd.Variable(torch.zeros(1, self.hidden_dim)))
-                #         fc_sum.append(autograd.Variable(torch.zeros(1, self.hidden_dim)))
-            offset_pos = []
-            fx_offset = []
-            hc_offset = []
-            fc_offset = []
-            if child_h is None:
-                max_childs = nlen
-            row = 0
+            if child_h is None:  # if no child nodes
+                max_childs = 1
+                # offset_pos = [0 for i in range(nlen)]
             for key, val in chi_par.items():
                 if len(val) > 0:
                     for v in val:
@@ -309,17 +287,17 @@ class BatchChildSumTreeLSTM(nn.Module):
             # node_num = len(input_ix)
             if self.add_cuda:
                 if child_h is None:
-                    child_h = autograd.Variable(torch.zeros(nlen, self.hidden_dim)).cuda()
-                    child_c = autograd.Variable(torch.zeros(nlen, self.hidden_dim)).cuda()
-                child_h_sum = autograd.Variable(torch.zeros(nlen * max_childs, self.hidden_dim)).cuda()
-                child_fh = autograd.Variable(torch.zeros(fx_len, self.hidden_dim)).cuda()
-                child_fc = autograd.Variable(torch.zeros(fx_len, self.hidden_dim)).cuda()
-                child_fc_sum = autograd.Variable(torch.zeros(nlen * max_childs, self.hidden_dim)).cuda()
-                select_indices = autograd.Variable(torch.LongTensor(input_ix)).cuda()
-                offset_pos = autograd.Variable(torch.LongTensor(offset_pos)).cuda()
-                fx_offset = autograd.Variable(torch.LongTensor(fx_offset)).cuda()
-                hc_offset = autograd.Variable(torch.LongTensor(hc_offset)).cuda()
-                fc_offset = autograd.Variable(torch.LongTensor(fc_offset)).cuda()
+                    child_h = autograd.Variable(torch.zeros(nlen, self.hidden_dim).cuda())
+                    child_c = autograd.Variable(torch.zeros(nlen, self.hidden_dim).cuda())
+                child_h_sum = autograd.Variable(torch.zeros(nlen * max_childs, self.hidden_dim).cuda())
+                child_fh = autograd.Variable(torch.zeros(fx_len, self.hidden_dim).cuda())
+                child_fc = autograd.Variable(torch.zeros(fx_len, self.hidden_dim).cuda())
+                child_fc_sum = autograd.Variable(torch.zeros(nlen * max_childs, self.hidden_dim).cuda())
+                select_indices = autograd.Variable(torch.LongTensor(input_ix).cuda())
+                offset_pos = autograd.Variable(torch.LongTensor(offset_pos).cuda())
+                fx_offset = autograd.Variable(torch.LongTensor(fx_offset).cuda())
+                hc_offset = autograd.Variable(torch.LongTensor(hc_offset).cuda())
+                fc_offset = autograd.Variable(torch.LongTensor(fc_offset).cuda())
             else:
                 if child_h is None:
                     child_h = autograd.Variable(torch.zeros(nlen, self.hidden_dim))
@@ -334,50 +312,169 @@ class BatchChildSumTreeLSTM(nn.Module):
                 hc_offset = autograd.Variable(torch.LongTensor(hc_offset))
                 fc_offset = autograd.Variable(torch.LongTensor(fc_offset))
 
-            embed_input = torch.index_select(embeds, 0, select_indices)
-            # embed_input = self.embedding(autograd.Variable(torch.LongTensor([n.word_idx for n in nodes])))
-            # fx = self.fx(embed_input)
+            # embed_input = torch.index_select(embeds, 0, select_indices)
+            # test_start = time.time()
+            embed_input = embeds[select_indices]
+
             fh = self.fh(child_h)
             if len(offset_pos) > 0:
-                child_h_sum = child_h_sum.index_copy(0, offset_pos, child_h.detach())
-                fx_list = []
-                for fo in range(fx_len):
-                    fx_list.append(embed_input[fx_offset[fo]])
-                child_fh = child_fh.index_copy(0, hc_offset, fh)
-                child_fc = child_fc.index_copy(0, hc_offset, child_c)
-                f = F.sigmoid(self.fx(torch.cat(fx_list)) + child_fh)
+                child_h_sum.index_copy_(0, offset_pos, child_h)
+                child_fh.index_copy_(0, hc_offset, fh)
+                child_fc.index_copy_(0, hc_offset, child_c)
+                f = F.sigmoid(self.fx(embed_input[fx_offset]) + child_fh)
                 fc = F.mul(f, child_fc)
-                child_fc_sum = child_fc_sum.index_copy(0, fc_offset, fc)
+                child_fc_sum.index_copy_(0, fc_offset, fc)
 
             child_h_sum = child_h_sum.view([nlen, max_childs, self.hidden_dim])
             child_fc_sum = child_fc_sum.view([nlen, max_childs, self.hidden_dim])
+
 
             child_c, child_h = self.batch_forward(embed_input, torch.sum(child_h_sum, 1), torch.sum(child_fc_sum, 1))
 
             out = self.out(self.dropout(child_h))
             out = torch.unsqueeze(out, 1)
-            # c = torch.unsqueeze(child_c,1)
-            # h = torch.unsqueeze(child_h,1)
-            for idx, node in enumerate(nodes):
-                # node.state= (c[idx],h[idx])
-                # node.out = out[idx]
-                if node.label is not None:
-                    if self.add_cuda:
-                        node_gold = autograd.Variable(torch.LongTensor([node.label])).cuda()
-                    else:
-                        node_gold = autograd.Variable(torch.LongTensor([node.label]))
-                    forest_loss += self.loss_func(out[idx], node_gold)
-                    # for child in node.children:
-                    #     if child.label is not None:
-                    #         forest_loss+=child.loss
-                    # node.loss = node_loss
+            # test_start = time.time()
+            # for idx, node in enumerate(nodes):
+            #     if node.label is not None:
+            #         if self.add_cuda:
+            #             node_gold = autograd.Variable(torch.LongTensor([node.label]).cuda())
+            #         else:
+            #             node_gold = autograd.Variable(torch.LongTensor([node.label]))
+            #         # out_list.append(out[idx])
+            #         # gold_list.append(node_gold)
+            #         forest_loss += self.loss_func(out[idx], node_gold)
+
+            # print("test time:",time.time()-test_start)
             if level == 0:
-                # loss = self.loss_func(out,autograd.Variable(torch.LongTensor([node.label for node in nodes])))
-                # return torch.squeeze(out,1),torch.sum(torch.cat([node.loss for node in nodes]))
-                return torch.squeeze(out, 1), forest_loss
-                # return out,loss
+                # forest_loss = self.loss_func(torch.cat(out_list),torch.cat(gold_list))
+                # return torch.squeeze(out, 1), forest_loss
+                return torch.squeeze(out, 1)
             level -= 1
 
+    # def forward(self,forest,embeds):
+    #     level = forest.max_level
+    #     child_c = child_h = None
+    #     nodes_len = []
+    #     input_ixs, offset_poss, fx_offsets, hc_offsets, fc_offsets ,max_childss,fx_lens = [], [], [], [], [],[],[]
+    #     for i in range(level+1):
+    #         nodes = [node for node in forest.node_list if node.level == i]
+    #         nodes_len.append(len(nodes))
+    #         chi_par = {}
+    #         max_childs, row = 1, 0
+    #         input_ix,offset_pos, fx_offset, hc_offset, fc_offset = [], [], [], [],[]
+    #         for idx, node in enumerate(nodes):
+    #             input_ix.append(node.forest_ix)
+    #             childs = []
+    #             if len(node.children) > max_childs:
+    #                 max_childs = len(node.children)
+    #             for ch_ix, child in enumerate(node.children):
+    #                 childs.append(ch_ix)
+    #             chi_par[idx] = childs
+    #         #level max_childs
+    #         max_childss.append(max_childs)
+    #         for key, val in chi_par.items():
+    #             if len(val) > 0:
+    #                 for v in val:
+    #                     offset_pos.append(key * max_childs + v)
+    #                     fx_offset.append(key)
+    #                     hc_offset.append(row)
+    #                     row += 1
+    #                     fc_offset.append(key * max_childs + v)
+    #             else:
+    #                 row += 1
+    #                 fx_offset.append(key)
+    #                 fc_offset.append(key * max_childs)
+    #         input_ixs.append(input_ix)
+    #         offset_poss.append(offset_pos)
+    #         fx_offsets.append(fx_offset)
+    #         hc_offsets.append(hc_offset)
+    #         fc_offsets.append(fc_offset)
+    #         fx_lens.append(len(fx_offset))
+    #     input_ixs,input_ixs_len = self.pad_list(input_ixs)
+    #     offset_poss,offset_poss_len = self.pad_list(offset_poss)
+    #     fx_offsets,fx_offsets_len = self.pad_list(fx_offsets)
+    #     hc_offsets,hc_offsets_len = self.pad_list(hc_offsets)
+    #     fc_offsets,fc_offsets_len = self.pad_list(fc_offsets)
+    #     if self.add_cuda:
+    #         input_ixs = torch.LongTensor(input_ixs).cuda()
+    #         input_ixs_len = torch.LongTensor(input_ixs_len).cuda()
+    #         offset_poss = autograd.Variable(torch.LongTensor(offset_poss).cuda())
+    #         offset_poss_len = torch.LongTensor(offset_poss_len).cuda()
+    #         fx_offsets = autograd.Variable(torch.LongTensor(fx_offsets).cuda())
+    #         fx_offsets_len = torch.LongTensor(fx_offsets_len).cuda()
+    #         hc_offsets = autograd.Variable(torch.LongTensor(hc_offsets).cuda())
+    #         hc_offsets_len = torch.LongTensor(hc_offsets_len).cuda()
+    #         fc_offsets = autograd.Variable(torch.LongTensor(fc_offsets).cuda())
+    #         fc_offsets_len = torch.LongTensor(fc_offsets_len).cuda()
+    #     else:
+    #         input_ixs = torch.LongTensor(input_ixs)
+    #         input_ixs_len = torch.LongTensor(input_ixs_len)
+    #         offset_poss = autograd.Variable(torch.LongTensor(offset_poss))
+    #         offset_poss_len = torch.LongTensor(offset_poss_len)
+    #         fx_offsets = autograd.Variable(torch.LongTensor(fx_offsets))
+    #         fx_offsets_len = torch.LongTensor(fx_offsets_len)
+    #         hc_offsets = autograd.Variable(torch.LongTensor(hc_offsets))
+    #         hc_offsets_len = torch.LongTensor(hc_offsets_len)
+    #         fc_offsets = autograd.Variable(torch.LongTensor(fc_offsets))
+    #         fc_offsets_len = torch.LongTensor(fc_offsets_len)
+    #     while level >= 0 :
+    #         if self.add_cuda:
+    #             if child_h is None:
+    #                 child_h = autograd.Variable(torch.zeros(nodes_len[level], self.hidden_dim).cuda())
+    #                 child_c = autograd.Variable(torch.zeros(nodes_len[level], self.hidden_dim).cuda())
+    #             child_h_sum = autograd.Variable(torch.zeros(nodes_len[level] * max_childss[level], self.hidden_dim).cuda())
+    #             child_fh = autograd.Variable(torch.zeros(fx_lens[level], self.hidden_dim).cuda())
+    #             child_fc = autograd.Variable(torch.zeros(fx_lens[level], self.hidden_dim).cuda())
+    #             child_fc_sum = autograd.Variable(torch.zeros(nodes_len[level] * max_childss[level], self.hidden_dim).cuda())
+    #             # select_indices = autograd.Variable(torch.LongTensor(input_ixs[level]).cuda())
+    #             # offset_pos = autograd.Variable(torch.LongTensor(offset_poss[level]).cuda())
+    #             # fx_offset = autograd.Variable(torch.LongTensor(fx_offsets[level]).cuda())
+    #             # hc_offset = autograd.Variable(torch.LongTensor(hc_offsets[level]).cuda())
+    #             # fc_offset = autograd.Variable(torch.LongTensor(fc_offsets[level]).cuda())
+    #         else:
+    #             if child_h is None:
+    #                 child_h = autograd.Variable(torch.zeros(nodes_len[level], self.hidden_dim))
+    #                 child_c = autograd.Variable(torch.zeros(nodes_len[level], self.hidden_dim))
+    #             child_h_sum = autograd.Variable(torch.zeros(nodes_len[level] * max_childss[level], self.hidden_dim))
+    #             child_fh = autograd.Variable(torch.zeros(fx_lens[level], self.hidden_dim))
+    #             child_fc = autograd.Variable(torch.zeros(fx_lens[level], self.hidden_dim))
+    #             child_fc_sum = autograd.Variable(torch.zeros(nodes_len[level] * max_childss[level], self.hidden_dim))
+    #             # select_indices = autograd.Variable(torch.LongTensor(input_ixs[level]))
+    #             # offset_pos = autograd.Variable(torch.LongTensor(offset_poss[level]))
+    #             # fx_offset = autograd.Variable(torch.LongTensor(fx_offsets[level]))
+    #             # hc_offset = autograd.Variable(torch.LongTensor(hc_offsets[level]))
+    #             # fc_offset = autograd.Variable(torch.LongTensor(fc_offsets[level]))
+    #
+    #         embed_input = embeds[input_ixs[level][:input_ixs_len[level]]]
+    #
+    #         fh = self.fh(child_h)
+    #         if offset_poss_len[level] > 0:
+    #             child_h_sum.index_copy_(0, offset_poss[level][:offset_poss_len[level]], child_h)
+    #             child_fh.index_copy_(0, hc_offsets[level][:hc_offsets_len[level]], fh)
+    #             child_fc.index_copy_(0, hc_offsets[level][:hc_offsets_len[level]], child_c)
+    #             f = F.sigmoid(self.fx(embed_input[fx_offsets[level][:fx_offsets_len[level]]]) + child_fh)
+    #             fc = F.mul(f, child_fc)
+    #             child_fc_sum.index_copy_(0, fc_offsets[level][:fc_offsets_len[level]], fc)
+    #
+    #         child_h_sum = child_h_sum.view([nodes_len[level], max_childss[level], self.hidden_dim])
+    #         child_fc_sum = child_fc_sum.view([nodes_len[level], max_childss[level], self.hidden_dim])
+    #
+    #         child_c, child_h = self.batch_forward(embed_input, torch.sum(child_h_sum, 1), torch.sum(child_fc_sum, 1))
+    #
+    #         out = self.out(self.dropout(child_h))
+    #         out = torch.unsqueeze(out, 1)
+    #
+    #         if level == 0:
+    #             # forest_loss = self.loss_func(torch.cat(out_list),torch.cat(gold_list))
+    #             # return torch.squeeze(out, 1), forest_loss
+    #             return torch.squeeze(out, 1)
+    #         level -= 1
+
+    def pad_list(self,o_list):
+        l_list = [len(i) for i in o_list]
+        max_len = max(l_list)
+        n_list = [item+[0]*(max_len-len(item)) for item in o_list]
+        return n_list,l_list
 
 class BinaryTreeLeafModule(nn.Module):
     def __init__(self, hyperparameter):
@@ -469,11 +566,6 @@ class EmbeddingModel(nn.Module):
         D = hyperparameter.embed_dim
         self.embedding = LoadEmbedding(V, D)
         if hyperparameter.pretrain:
-            # emb = torch.load(hyperparameter.embed_save_pickle)
-            # self.state_dict()['embedding.weight'].copy_(emb)
-            # if hyperparameter.fine_tune is False:
-            #     for param in self.parameters():
-            #         param.requires_grad = False
             self.embedding.load_pretrained_embedding(hyperparameter.pretrain_file, hyperparameter.vocab,
                                                      requires_grad=hyperparameter.fine_tune,
                                                      embed_pickle=hyperparameter.embed_save_pickle, binary=False)
