@@ -17,8 +17,10 @@ from Dataset import *
 from utils import *
 from torch.autograd import Variable
 from graphviz import Digraph
+import torch.backends.cudnn
 
 random.seed(233)
+
 
 class CNNClassifier:
     def __init__(self, hyperparameter):
@@ -105,6 +107,7 @@ class CNNClassifier:
             x = autograd.Variable(torch.LongTensor([data.code_list]))
             y = autograd.Variable(torch.LongTensor([data.label]))
         return x, y
+
 
 class LSTMClassifier:
     def __init__(self, hyperparameter):
@@ -216,23 +219,28 @@ class LSTMClassifier:
             y = autograd.Variable(torch.LongTensor([data.label]))
         return x, y
 
+
 class TreeLstmClassifier:
     def __init__(self, hyperparameter):
         self.args = hyperparameter
 
     def train(self, train_set, dev_set=None, test_set=None):
-        data_len =  len(train_set[0])
-        train_trees = train_set[0]
-        train_sentences = train_set[1]
+        data_len = len(train_set)
+        train_trees = train_set
         rand = []
         for i in range(data_len):
             rand.append(i)
-        batch_block = data_len// self.args.batch_size
+        batch_block = data_len // self.args.batch_size
         if data_len % self.args.batch_size:
             batch_block += 1
 
         embed_model = EmbeddingModel(self.args)
-        model = BatchChildSumTreeLSTM(self.args)
+        if self.args.model_name == "dependency":
+            model = BatchChildSumTreeLSTM(self.args)
+        elif self.args.model_name == "constituency":
+            model = BinaryTreeLstm(self.args)
+        else:
+            raise RuntimeError('model_name error ,pls check')
         if self.args.cuda:
             embed_model.cuda()
             model.cuda()
@@ -243,11 +251,7 @@ class TreeLstmClassifier:
         if self.args.optim == "adam":
             optimizer = optim.Adam(params=parameters, lr=self.args.learn_rate, weight_decay=self.args.weight_decay)
         elif self.args.optim == "adagrad":
-            optimizer = optim.Adagrad(params=parameters,lr=self.args.learn_rate,weight_decay=self.args.weight_decay)
-
-        # dev_forest = Forest(dev_set[0])
-        # test_forest = Forest(test_set[0])
-        # utils.count_param(model)
+            optimizer = optim.Adagrad(params=parameters, lr=self.args.learn_rate, weight_decay=self.args.weight_decay)
 
         for i in range(self.args.epoch):
             model.train()
@@ -255,97 +259,69 @@ class TreeLstmClassifier:
             embed_model.zero_grad()
             model.zero_grad()
             loss_sum = 0
-            num_sentences = cor_sentences =  0
+            num_sentences = cor_sentences = 0
             start = time.time()
-            # random.shuffle(rand)
             random.shuffle(train_trees)
             print("No.{} training ....:".format(i + 1))
-            #no batch
-            # optimizer.zero_grad()
-            # embed_model.zero_grad()
-            # for idx in range(data_len):
-            #     if self.args.cuda:
-            #         sen = autograd.Variable(torch.LongTensor(train_sentences[rand[idx]])).cuda()
-            #     else:
-            #         sen = autograd.Variable(torch.LongTensor(train_sentences[rand[idx]]))
-            #     embeds = embed_model.forward(sen)
-            #     embeds = torch.unsqueeze(embeds,1)
-            #     output,loss = model.forward(train_trees[rand[idx]],embeds)
-            #     # loss = loss
-            #     loss_sum += loss.data[0]
-            #     loss.backward()
-            #     if idx % self.args.batch_size==0:
-            #         for f in embed_model.parameters():
-            #             f.data.sub_(f.grad.data*self.args.embed_learn_rate)
-            #         optimizer.step()
-            #         embed_model.zero_grad()
-            #         optimizer.zero_grad()
-            #
-            #     output[:, 1] = -9999
-            #     val,pred = torch.max(output.data,1)
-            #     if pred[0] == train_trees[rand[idx]].label:
-            #         cor_sentences += 1
-            #     num_sentences += 1
-
-            # add batch
             for idx in range(batch_block):
+                # test_start = time.time()
                 left = idx * self.args.batch_size
                 right = left + self.args.batch_size
                 if right < data_len:
                     forest = Forest(train_trees[left:right])
                 else:
                     forest = Forest(train_trees[left:])
-                # y = torch.LongTensor([t.label for t in forest.trees])
                 if self.args.cuda:
-                    sen  = autograd.Variable(torch.LongTensor([n.word_idx for n in forest.node_list])).cuda()
+                    sen = autograd.Variable(torch.LongTensor([n.word_idx for n in forest.node_list])).cuda()
+                    y = autograd.Variable(torch.LongTensor([t.label for t in forest.trees])).cuda()
                 else:
                     sen = autograd.Variable(torch.LongTensor([n.word_idx for n in forest.node_list]))
+                    y = autograd.Variable(torch.LongTensor([t.label for t in forest.trees]))
                 embeds = embed_model.forward(sen)
-                out,loss = model.forward(forest,embeds)
-                loss = loss/self.args.batch_size
-                # loss = F.cross_entropy(out,y)
+                # out,loss = model.forward(forest,embeds)
+                if self.args.bidirectional is False:
+                    out = model.forward(forest, embeds)
+                else:
+                    out = model.bid_forward(forest, embeds)
+                # loss = loss/self.args.batch_size
+                loss = F.cross_entropy(out, y)
                 loss_sum += loss.data[0]
-                loss.backward()
+                # loss.backward()
                 # if self.args.fine_tune:
                 #     for f in embed_model.parameters():
                 #         f.data.sub_(f.grad.data*self.args.embed_learn_rate)
                 optimizer.step()
                 embed_model.zero_grad()
                 optimizer.zero_grad()
-                # optimizer.__setattr__('lr',self.args.learn_rate)
-                # self.args.learn_rate *= 0.9
-                out.data[:,1] = -1e+7
-                val,pred = torch.max(out.data,1)
+                out.data[:, 1] = -1e+7
+                val, pred = torch.max(out.data, 1)
                 for x in range(len(forest.trees)):
                     if forest.trees[x].label == pred[x]:
                         cor_sentences += 1
                     num_sentences += 1
                 forest.clean_state()
+                if self.args.cuda:
+                    torch.cuda.empty_cache()
+                # print("test time:",time.time()-test_start)
             print("this epoch loss :{},train_accuracy : {},consume time:{}".format(loss_sum / data_len,
                                                                                    cor_sentences / num_sentences,
                                                                                    time.time() - start))
-            #no batch
-            # if dev_set is not None:
-            #     self.test(embed_model,model, dev_set,"dev")
-            # if test_set is not None:
-            #     self.test(embed_model,model, test_set,"test")
-            #batch
 
             if dev_set is not None:
-                self.batchtest(embed_model,model, dev_set[0],"dev")
+                self.batchtest(embed_model, model, dev_set, "dev")
             if test_set is not None:
-                self.batchtest(embed_model,model, test_set[0],"test")
+                self.batchtest(embed_model, model, test_set, "test")
 
-    def test(self, embed_model,model,dataset, dataset_name):
+    def test(self, embed_model, model, dataset, dataset_name):
         model.eval()
         embed_model.eval()
         cor = total = 0
-        #no batch
+        # no batch
         data_len = len(dataset[0])
         data_trees = dataset[0]
         data_sentences = dataset[1]
         for idx in range(data_len):
-            sen = autograd.Variable(torch.LongTensor(data_sentences[idx]),volatile=True)
+            sen = autograd.Variable(torch.LongTensor(data_sentences[idx]), volatile=True)
 
             embeds = torch.unsqueeze(embed_model(sen), 1)
             output, loss = model(data_trees[idx], embeds)
@@ -368,7 +344,7 @@ class TreeLstmClassifier:
         print(dataset_name, total)
         print("{}_set accuracy:{}".format(dataset_name, cor / total))
 
-    def batchtest(self,embed_model,model,dataset,dataset_name):
+    def batchtest(self, embed_model, model, dataset, dataset_name):
         model.eval()
         embed_model.eval()
         cor = total = 0
@@ -378,28 +354,33 @@ class TreeLstmClassifier:
             batch_block += 1
         for idx in range(batch_block):
             left = idx * self.args.batch_size
-            right = left+self.args.batch_size
+            right = left + self.args.batch_size
             if right < data_len:
                 forest = Forest(dataset[left:right])
             else:
                 forest = Forest(dataset[left:])
             # y = torch.LongTensor([t.label for t in forest.trees])
             if self.args.cuda:
-                sen = autograd.Variable(torch.LongTensor([n.word_idx for n in forest.node_list])).cuda()
+                sen = autograd.Variable(torch.LongTensor([n.word_idx for n in forest.node_list]).cuda())
             else:
                 sen = autograd.Variable(torch.LongTensor([n.word_idx for n in forest.node_list]))
             # embeds = torch.unsqueeze(embed_model(sen),1)
             # out,loss = model(forest)
-            out,loss = model(forest,embed_model(sen))
-            out.data[:,1] = -1e+7
-            val,pred = torch.max(out.data,1)
+            # out,loss = model(forest,embed_model(sen))
+            if self.args.bidirectional is False:
+                out = model.forward(forest, embed_model(sen))
+            else:
+                out = model.bid_forward(forest, embed_model(sen))
+            if not self.args.five:
+                out.data[:, 1] = -1e+7
+            val, pred = torch.max(out.data, 1)
             for x in range(len(forest.trees)):
                 if forest.trees[x].label == pred[x]:
                     cor += 1
                 total += 1
             forest.clean_state()
         print("{}_set accuracy:{}".format(dataset_name, cor / total))
-        return cor/total
+        return cor / total
 
     @staticmethod
     def get_max_index(output):
@@ -462,6 +443,7 @@ class BatchGenerator:
                     print('padding', end=' 0|')
             print()
 
+
 if __name__ == "__main__":
     # lstm sentiment classifier use cv
     # param = HyperParameter()
@@ -476,15 +458,33 @@ if __name__ == "__main__":
 
     # treelstm sentiment classifier on SST
     param = HyperParameter()
-
+    torch.backends.cudnn.benchmark = True
     vocab = Vocab("sst/vocab-cased.txt")
-    sent_dict = DataUtils.get_sentiment_dict("sst/sentiment_labels.txt","sst/dictionary.txt")
+    # sent_dict = DataUtils.get_sentiment_dict("sst/sentiment_labels.txt","sst/dictionary.txt")
     param.vocab = vocab.labelToIdx
     param.n_embed = len(vocab.labelToIdx)
     param.n_label = 3
+    param.five = False
     param.embed_dim = 300
-    train_dataset = DataUtils.build_deptree("sst/train/sents.txt","sst/train/dlabels.txt","sst/train/dparents.txt",vocab,sent_dict)
-    dev_dataset = DataUtils.build_deptree("sst/dev/sents.txt","sst/dev/dlabels.txt","sst/dev/dparents.txt",vocab,sent_dict)
-    test_dataset = DataUtils.build_deptree("sst/test/sents.txt","sst/test/dlabels.txt","sst/test/dparents.txt",vocab,sent_dict)
+    train_dir = "sst/train/"
+    dev_dir = "sst/dev/"
+    test_dir = "sst/test/"
+    if param.model_name == 'dependency':
+        train_dataset = DataUtils.build_deptree(train_dir + "sents.txt", train_dir + "dlabels.txt",
+                                             train_dir + "dparents.txt", vocab, param.five)
+        dev_dataset = DataUtils.build_deptree(dev_dir + "sents.txt", dev_dir + "dlabels.txt", dev_dir + "dparents.txt",
+                                           vocab, param.five)
+        test_dataset = DataUtils.build_deptree(test_dir + "sents.txt", test_dir + "dlabels.txt", test_dir + "dparents.txt",
+                                            vocab, param.five)
+    elif param.model_name == 'constituency':
+        train_dataset = DataUtils.build_constree(train_dir + "sents.txt", train_dir + "labels.txt",
+                                             train_dir + "parents.txt", vocab, param.five)
+        dev_dataset = DataUtils.build_constree(dev_dir + "sents.txt", dev_dir + "labels.txt", dev_dir + "parents.txt",
+                                           vocab, param.five)
+        test_dataset = DataUtils.build_constree(test_dir + "sents.txt", test_dir + "labels.txt", test_dir + "parents.txt",
+                                            vocab, param.five)
+    else:
+        raise RuntimeError("no such model name !")
+    print("build tree finish")
     classifier = TreeLstmClassifier(param)
-    classifier.train(train_set=train_dataset,dev_set=dev_dataset,test_set=test_dataset)
+    classifier.train(train_set=train_dataset, dev_set=dev_dataset, test_set=test_dataset)

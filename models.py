@@ -207,6 +207,7 @@ class BatchChildSumTreeLSTM(nn.Module):
         self.hidden_dim = hyperparameter.hidden_dim
         self.out_dim = hyperparameter.n_label
         self.add_cuda = hyperparameter.cuda
+        self.bid = hyperparameter.bidirectional
 
         self.ix = nn.Linear(self.in_dim, self.hidden_dim)
         self.ih = nn.Linear(self.hidden_dim, self.hidden_dim)
@@ -221,8 +222,11 @@ class BatchChildSumTreeLSTM(nn.Module):
         self.uh = nn.Linear(self.hidden_dim, self.hidden_dim)
 
         self.out = nn.Linear(self.hidden_dim, self.out_dim)
+        self.biout = nn.Linear(self.hidden_dim*2 , self.out_dim)
         self.loss_func = nn.CrossEntropyLoss()
         self.dropout = nn.Dropout(hyperparameter.dropout)
+
+        self.lstmcell = nn.LSTMCell(self.in_dim,self.hidden_dim)
 
         if hyperparameter.clip_max_norm is not None:
             nn.utils.clip_grad_norm(self.parameters(), max_norm=hyperparameter.clip_max_norm)
@@ -244,16 +248,12 @@ class BatchChildSumTreeLSTM(nn.Module):
         return c, h
 
     def forward(self, forest,embeds):
-        # embeds = self.dropout(embeds)
-        level = forest.max_level
         child_c = child_h = None
         if self.add_cuda:
             forest_loss = autograd.Variable(torch.zeros(1).cuda())
         else:
             forest_loss = autograd.Variable(torch.zeros(1))
-        # gold_list = []
-        # out_list = []
-        while level >= 0:
+        for level in range(forest.max_level+1)[::-1]:
             nodes = [node for node in forest.node_list if node.level == level]
             nlen = len(nodes)
             input_ix = []
@@ -334,7 +334,8 @@ class BatchChildSumTreeLSTM(nn.Module):
             out = self.out(self.dropout(child_h))
             out = torch.unsqueeze(out, 1)
             # test_start = time.time()
-            # for idx, node in enumerate(nodes):
+            for idx, node in enumerate(nodes):
+                node.dt_state = torch.unsqueeze(child_c[idx],0),torch.unsqueeze(child_h[idx],0)
             #     if node.label is not None:
             #         if self.add_cuda:
             #             node_gold = autograd.Variable(torch.LongTensor([node.label]).cuda())
@@ -349,7 +350,67 @@ class BatchChildSumTreeLSTM(nn.Module):
                 # forest_loss = self.loss_func(torch.cat(out_list),torch.cat(gold_list))
                 # return torch.squeeze(out, 1), forest_loss
                 return torch.squeeze(out, 1)
-            level -= 1
+            # level -= 1
+
+    def bid_forward(self,forest,embeds):
+        self.forward(forest,embeds)
+        c = h = None
+        # forest_h = autograd.Variable(torch.zeros(len(forest.trees),forest.max_nodes,self.hidden_dim*2))
+        if self.add_cuda:
+            forest_h = autograd.Variable(torch.zeros(len(forest.trees)*forest.max_nodes,self.hidden_dim*2).cuda())
+        else:
+            forest_h = autograd.Variable(torch.zeros(len(forest.trees)*forest.max_nodes,self.hidden_dim*2))
+        # forest_h = [[ autograd.Variable(torch.zeros(1,self.hidden_dim*2)).detach() for j in range(forest.max_nodes)]for i in range(len(forest.trees))]
+        pos = [0 for i in range(len(forest.trees))]
+        for level in range(forest.max_level+1):
+            nodes = [node for node in forest.node_list if node.level == level]
+            nlen = len(nodes)
+            input_ix = []
+            c_list,h_list,fc_list,offset_list,cat_h_list = [],[],[],[],[]
+            for idx,node in enumerate(nodes):
+                input_ix.append(node.forest_ix)
+                if node.parent is not None:
+                    c_list.append(node.parent.td_state[0])
+                    h_list.append(node.parent.td_state[1])
+            if len(c_list) == 0:
+                if self.add_cuda:
+                    c = autograd.Variable(torch.zeros(nlen,self.hidden_dim).cuda())
+                    h = autograd.Variable(torch.zeros(nlen,self.hidden_dim).cuda())
+                else:
+                    c = autograd.Variable(torch.zeros(nlen, self.hidden_dim))
+                    h = autograd.Variable(torch.zeros(nlen, self.hidden_dim))
+            else:
+                c = torch.cat(c_list)
+                h = torch.cat(h_list)
+            if self.add_cuda:
+                input_ix = autograd.Variable(torch.LongTensor(input_ix).cuda())
+            else:
+                input_ix = autograd.Variable(torch.LongTensor(input_ix))
+            embeds_input = embeds[input_ix]
+            # embeds_input = torch.unsqueeze(embeds_input,1)
+            lstm_time = time.time()
+            nodes_c,nodes_h = self.lstmcell(embeds_input,(h,c))
+            print("lstm time:",time.time()-lstm_time)
+            nodes_h = self.dropout(nodes_h)
+            for idx, node in enumerate(nodes):
+                # node_c = torch.cat([node.state[0],parent_c[idx]])
+                node.td_state = torch.unsqueeze(nodes_c[idx],0),torch.unsqueeze(nodes_h[idx],0)
+                node_h = torch.cat([node.dt_state[1],node.td_state[1]],1)
+                cat_h_list.append(node_h)
+                # forest_h[node.mark][pos[node.mark]] = node_h
+                # pos[node.mark] += 1
+                offset_list.append(node.mark*forest.max_nodes+pos[node.mark])
+                pos[node.mark] += 1
+            if self.add_cuda:
+                offset = autograd.Variable(torch.LongTensor(offset_list).cuda())
+            else:
+                offset = autograd.Variable(torch.LongTensor(offset_list))
+            forest_h.index_copy_(0,offset,torch.cat(cat_h_list))
+        forest_h = forest_h.view([len(forest.trees),forest.max_nodes,self.hidden_dim*2])
+        forest_h = forest_h.permute(0,2,1)
+        forest_h = F.max_pool1d(forest_h,forest_h.size(2)).squeeze(2)
+        out  = self.biout(forest_h)
+        return out
 
     # def forward(self,forest,embeds):
     #     level = forest.max_level

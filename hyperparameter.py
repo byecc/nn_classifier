@@ -2,9 +2,9 @@ class HyperParameter:
 
     def __init__(self):
 
-        self.batch_size=25 #require above zero       1,16,256
+        self.batch_size=16 #require above zero       1,16,256
         #CNNN hyperparameter
-        self.epoch = 512
+        self.epoch = 125
         self.n_embed = 0
         self.embed_dim = 300
         self.n_label = 0
@@ -26,7 +26,6 @@ class HyperParameter:
         # self.pretrain_file = "data/converted_word_CR.txt"
         self.pretrain_file = "data/glove.840B.300d.txt"
         # self.pretrain_file = "data/word2vec.test.bin"
-        self.embed_pickle = ""
         self.embed_save_pickle = "sst_embed/embed.pkl"
         # self.embed_save_pickle = "sst_embed/sst_embed.pth"
         self.model_dict = {}
@@ -38,9 +37,12 @@ class HyperParameter:
         self.init_weight = True
         self.gain = 0.4
 
+        self.model_name = 'dependency' # treelstm model name constituency or dependency
+        self.bidirectional = True
         self.cuda = False
         self.vocab = {}
         self.packet_nums = 10 #CV 包个数
+
 
         #Stanford Parser
         self.train_dataset = "dataset/stsa.binary.train"
